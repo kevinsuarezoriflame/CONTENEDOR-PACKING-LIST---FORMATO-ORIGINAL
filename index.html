@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Packing-List Formatter (PDF → Excel)</title>
+
+<!-- pdf.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<!-- SheetJS -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;margin:2rem;background:#eef7f0;color:#1f2a1f}
+  .card{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.08);max-width:1050px;margin:auto;border-top:8px solid #0B6E4F}
+  h2{margin-top:0;color:#0B6E4F;letter-spacing:.3px}
+  input[type=file]{margin:1rem 0}
+  button{padding:.65rem 1.4rem;border:none;background:#0B6E4F;color:#fff;border-radius:999px;font-weight:700;cursor:pointer}
+  button[disabled]{background:#8fb8a8;cursor:not-allowed}
+  button:hover:not([disabled]){background:#095c42}
+  table{width:100%;border-collapse:collapse;margin-top:1rem;font-size:.9rem}
+  th,td{border:1px solid #cfd9d3;padding:4px 6px;text-align:left;white-space:nowrap}
+  th{background:#dff1e7;color:#0b3d2e}
+  #status{margin-left:1rem;font-weight:700;color:#0b3d2e}
+
+  #dropzone{
+    margin:1rem 0;
+    padding:1.2rem;
+    border:2px dashed #0B6E4F;
+    border-radius:12px;
+    background:#f3fbf6;
+    color:#0b3d2e;
+    text-align:center;
+    cursor:pointer;
+    user-select:none;
+  }
+  #dropzone.dragover{
+    border-color:#095c42;
+    background:#e0f3e7;
+  }
+  .hint{font-size:.9rem;color:#3c5c4f;margin-top:.25rem}
+
+
+  .tools-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1.2rem 0}
+  .tool-box{background:#f8fffb;border:1px solid #cfe3d7;border-radius:12px;padding:1rem}
+  .tool-box h3{margin:.1rem 0 .45rem 0;color:#0B6E4F;font-size:1rem}
+  textarea{width:100%;min-height:105px;box-sizing:border-box;border:1px solid #b9d1c4;border-radius:10px;padding:.7rem;font-family:Arial,Helvetica,sans-serif;resize:vertical;background:#fff}
+  .msg-input{width:100%;box-sizing:border-box;border:1px solid #b9d1c4;border-radius:10px;padding:.65rem;margin:.45rem 0;background:#fff}
+  .secondary{background:#2f6f9f}
+  .secondary:hover:not([disabled]){background:#255a81}
+  .mini-status{display:block;margin-top:.5rem;font-weight:700;color:#0b3d2e;font-size:.86rem}
+  @media(max-width:850px){.tools-grid{grid-template-columns:1fr}}
+
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>📦 Packing-List Formatter (PDF → Excel)</h2>
+    <p>Sube el <strong>PDF</strong> del packing-list, revisa la vista previa y descarga el Excel formateado.</p>
+    <div id="dropzone">
+      Arrastra y suelta aquí tus PDFs (uno o varios) o haz clic para seleccionarlos.
+      <div class="hint">Recomendación operativa: selección múltiple o “arrastrar y soltar” para procesar en lote y generar un solo Excel consolidado.</div>
+    </div>
+
+    <input type="file" id="input-pdf" accept=".pdf" multiple>
+<button id="btn-process"  onclick="processPDF()">Procesar PDF</button>
+    <button id="btn-download" onclick="downloadExcel()" disabled>Descargar Excel</button>
+    <button id="btn-review" onclick="downloadRevisionExcel()" disabled>Revisión de carga</button>
+    <span id="status"></span>
+
+    <div class="tools-grid">
+      <div class="tool-box">
+        <h3>🏷️ Códigos para adecuar</h3>
+        <div class="hint">Pega aquí la tabla del correo o solo los códigos. Al hacer match en la data procesada, se marcarán como <strong>Prioridad de etiquetado</strong>.</div>
+        <textarea id="priority-codes" placeholder="Ejemplo:
+Code	Description
+47841	Flawless Canvas Wedges
+47168	THE ONE Wonder Lash..."></textarea>
+        <button class="secondary" onclick="applyPriorityCodes()">Aplicar prioridad</button>
+        <span id="priority-status" class="mini-status"></span>
+      </div>
+
+      <div class="tool-box">
+        <h3>💬 Comentarios por código</h3>
+        <div class="hint">Pega los códigos que quieras buscar y escribe el comentario operativo. La web hará el match y lo agregará en comentarios.</div>
+        <input id="custom-comment" class="msg-input" placeholder="Mensaje. Ej.: Revisar lote / Separar para ingreso / Urgente SVR">
+        <textarea id="custom-codes" placeholder="Pega códigos aquí, uno debajo de otro o desde Excel"></textarea>
+        <button class="secondary" onclick="applyCustomComment()">Aplicar comentario</button>
+        <span id="custom-status" class="mini-status"></span>
+      </div>
+    </div>
+
+
+    <div id="preview-wrapper"></div>
+  </div>
+
+<script>
+/* ---------- configuración pdf.js ---------- */
+const pdfjsLib = window['pdfjs-dist/build/pdf'];
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+/* ---------- helpers ---------- */
+const clean  = s => s.replace(/\s+/g,' ').trim();
+const isInt  = s => /^\d+$/.test(s);
+const isExp  = s => /^\d{8}$/.test(s);
+const isItem = s => /^\d{5,}\.\d+$/.test(s);           /* 47804.1 */
+const ssccRx = /^(M|FL)\s*\d{12,}$/i;
+
+/* ---------- variables ---------- */
+let formattedData = [];
+let outputName    = 'packing_list_formateado.xlsx';
+
+
+let selectedFiles = [];
+
+
+/* ---------- comentarios operativos por código ---------- */
+function extractCodesFromText(text){
+  const found = new Set();
+  String(text || '')
+    .split(/\r?\n/)
+    .forEach(line=>{
+      const cells = line.split(/\t|;|,/).map(x=>String(x||'').trim()).filter(Boolean);
+      const firstCell = cells[0] || '';
+      const mFirst = firstCell.match(/^0*(\d{5,6})(?:\.\d+)?$/);
+      if(mFirst){ found.add(String(parseInt(mFirst[1],10))); return; }
+
+      const matches = String(line||'').match(/\b0*\d{5,6}(?:\.\d+)?\b/g) || [];
+      matches.forEach(m=>{
+        const n = m.split('.')[0].replace(/^0+/, '');
+        if(n.length >= 5 && n.length <= 6) found.add(n);
+      });
+    });
+  return found;
+}
+
+function mergeComment(current, msg){
+  current = String(current || '').trim();
+  msg = String(msg || '').trim();
+  if(!msg) return current;
+  if(!current) return msg;
+  return current.split(' | ').includes(msg) ? current : current + ' | ' + msg;
+}
+
+function applyCommentToCodes(codeSet, msg){
+  if(!formattedData.length) return {matched:0, totalCodes:codeSet.size};
+  let matched = 0;
+  formattedData.forEach(r=>{
+    const code = String(r['Item'] || r['Item 2'] || '').replace(/^0+/, '');
+    if(codeSet.has(code)){
+      r['Comentarios'] = mergeComment(r['Comentarios'], msg);
+      matched++;
+    }
+  });
+  showPreview(formattedData);
+  return {matched, totalCodes:codeSet.size};
+}
+
+function applyPriorityCodes(){
+  const st = document.getElementById('priority-status');
+  const codeSet = extractCodesFromText(document.getElementById('priority-codes').value);
+  if(!codeSet.size){ st.textContent = 'No detecté códigos válidos.'; return; }
+  const res = applyCommentToCodes(codeSet, 'Prioridad de etiquetado');
+  st.textContent = formattedData.length
+    ? `Listo: ${res.matched} fila(s) marcadas de ${res.totalCodes} código(s) pegados.`
+    : `Guardado en pantalla: ${res.totalCodes} código(s). Procesa el PDF y se aplicará automático.`;
+}
+
+function applyCustomComment(){
+  const st = document.getElementById('custom-status');
+  const msg = document.getElementById('custom-comment').value.trim();
+  const codeSet = extractCodesFromText(document.getElementById('custom-codes').value);
+  if(!msg){ st.textContent = 'Falta escribir el comentario.'; return; }
+  if(!codeSet.size){ st.textContent = 'No detecté códigos válidos.'; return; }
+  const res = applyCommentToCodes(codeSet, msg);
+  st.textContent = formattedData.length
+    ? `Listo: ${res.matched} fila(s) comentadas de ${res.totalCodes} código(s) pegados.`
+    : `Guardado en pantalla: ${res.totalCodes} código(s). Procesa el PDF y se aplicará automático.`;
+}
+
+function applyPendingCommentsSilently(){
+  const prio = extractCodesFromText(document.getElementById('priority-codes')?.value || '');
+  if(prio.size) applyCommentToCodes(prio, 'Prioridad de etiquetado');
+
+  const msg = document.getElementById('custom-comment')?.value.trim() || '';
+  const custom = extractCodesFromText(document.getElementById('custom-codes')?.value || '');
+  if(msg && custom.size) applyCommentToCodes(custom, msg);
+}
+
+
+/* ---------- UI: selección múltiple y drag & drop ---------- */
+function updateDropzone(){
+  const dz = document.getElementById('dropzone');
+  if(!dz) return;
+
+  if(!selectedFiles.length){
+    dz.innerHTML = 'Arrastra y suelta aquí tus PDFs (uno o varios) o haz clic para seleccionarlos.'
+      + '<div class="hint">Recomendación operativa: selección múltiple o “arrastrar y soltar” para procesar en lote y generar un solo Excel consolidado.</div>';
+    return;
+  }
+
+  const names = selectedFiles.map(f=>f.name);
+  const preview = (names.length<=3)
+    ? names.join(', ')
+    : names.slice(0,3).join(', ') + ` +${names.length-3} más`;
+
+  dz.innerHTML = `Listos: <strong>${names.length}</strong> PDF(s).<div class="hint">${preview}</div>`;
+}
+
+function setSelectedFiles(fileList){
+  selectedFiles = Array.from(fileList || []);
+  document.getElementById('btn-download').disabled = true;
+  document.getElementById('btn-review').disabled   = true;
+  document.getElementById('status').textContent =
+    selectedFiles.length ? ` ${selectedFiles.length} PDF(s) listos para procesar.` : '';
+  updateDropzone();
+}
+
+(function initUI(){
+  const input = document.getElementById('input-pdf');
+  const dz    = document.getElementById('dropzone');
+
+  if(input){
+    input.addEventListener('change', e => setSelectedFiles(e.target.files));
+  }
+
+  if(dz){
+    dz.addEventListener('click', () => input && input.click());
+    dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+    dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('dragover'); setSelectedFiles(e.dataTransfer.files); });
+  }
+  updateDropzone();
+})();
+
+/* ---------- leer PDF y generar líneas ---------- */
+async function pdfToLines(file){
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const pdf   = await pdfjsLib.getDocument({data:bytes}).promise;
+  const lines = [];
+
+  for(let p=1; p<=pdf.numPages; p++){
+    const page = await pdf.getPage(p);
+    const txt  = await page.getTextContent();
+    const byY  = {};
+    txt.items.forEach(it=>{
+      const y = Math.round(it.transform[5]);                 /* posición Y */
+      (byY[y] = byY[y] || []).push({x: it.transform[4], str: it.str});
+    });
+    /* ordenar de arriba (mayor Y) → abajo (menor Y) */
+    Object.keys(byY).map(Number).sort((a,b)=>b-a).forEach(y=>{
+      const line = byY[y]
+                    .sort((a,b)=>a.x-b.x)
+                    .map(o=>o.str)
+                    .join(' ');
+      lines.push(clean(line));
+    });
+  }
+  return lines;
+}
+
+
+/* ---------- extraer embarque (Invoice no) ---------- */
+function extractInvoice(lines){
+  // Caso típico: "Invoice no: M92144"
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    let m = line.match(/Invoice\s*no\s*:?\s*([A-Z0-9]+)/i);
+    if(m && m[1]) return m[1].trim();
+
+    // Caso: "Invoice no:" en una línea y el número en la siguiente
+    if(/^\s*Invoice\s*no\s*:\s*$/i.test(line)){
+      for(let j=i+1;j<Math.min(i+6, lines.length);j++){
+        const cand = (lines[j]||'').trim();
+        if(cand && /^[A-Z0-9]{3,}$/.test(cand)) return cand;
+      }
+    }
+  }
+  return '';
+}
+
+
+/* ---------- parsear líneas ---------- */
+function parseLines(lines){
+  const rows=[]; let sscc='';
+  lines.forEach(line=>{
+    /* SSCC en la misma línea del rótulo */
+    if(line.startsWith('SSCC pallet number')){
+      const after=line.split(/SSCC pallet number:\s*/i)[1]||'';
+      if(ssccRx.test(after)) sscc = clean(after);
+      return;
+    }
+    /* línea que es solo el SSCC */
+    if(ssccRx.test(line)){
+      sscc = clean(line);
+      /* retro-asignar a filas previas sin pallet */
+      for(let i=rows.length-1;i>=0 && rows[i].pallet===''; i--){
+        rows[i].pallet = sscc;
+      }
+      return;
+    }
+
+    /* ítem */
+    const tk=line.split(' ');
+    if(!isItem(tk[0])) return;
+
+    /* buscar la PRIMERA terna válida Boxes/Units/UXC tras la descripción */
+    let idx=-1;
+    for(let i=1;i<tk.length-2;i++){
+      if(isInt(tk[i]) && isInt(tk[i+1]) && isInt(tk[i+2])){
+        const bx = parseInt(tk[i],10);
+        const un = parseInt(tk[i+1],10);
+        const uxc= parseInt(tk[i+2],10);
+        if(
+          bx>0 && bx<=500 &&          /* cajas razonables */
+          un>=bx &&                   /* unidades ≥ cajas */
+          uxc>0 && uxc<=un &&
+          un % uxc === 0 &&           /* divisible exacto */
+          un / uxc === bx
+        ){
+          idx=i; break;
+        }
+      }
+    }
+    if(idx===-1) return;             /* línea atípica */
+
+    const itemFull = tk[0];
+    const desc     = tk.slice(1, idx).join(' ');
+    const boxes    = parseInt(tk[idx],10);
+    const uBox     = parseInt(tk[idx+2],10);
+
+    /* expiry = último entero de 8 dígitos*/
+    let expiry=''; for(let i=tk.length-1;i>idx;i--){ if(isExp(tk[i])){ expiry=tk[i]; break; } }
+
+    rows.push({itemFull, desc, boxes, unitsBox: uBox, expiry, pallet: sscc});
+  });
+  return rows;
+}
+
+/* ---------- formatear para tabla/Excel ---------- */
+function buildFormatted(raw, embarque){
+  return raw.map(r=>{
+    const code = r.itemFull.split('.')[0];
+    return {
+      'Item 2'        : code.padStart(6,'0'),
+      'Item'          : code,
+      'Description'   : r.desc,
+      'Boxes'         : r.boxes,
+      'UXC'           : String(r.unitsBox).padStart(4,'0'),
+      'Units per box' : r.unitsBox,
+      'Total'         : r.boxes * r.unitsBox,
+      'Caducidad'     : r.expiry ? r.expiry.slice(4,6)+r.expiry.slice(2,4) : '0000',
+      'Pallet number' : r.pallet,
+      'Embarque'     : embarque,
+      'Comentarios'  : ''
+    };
+  });
+}
+
+/* ---------- vista previa ---------- */
+function showPreview(arr){
+  const wrap=document.getElementById('preview-wrapper');
+  wrap.innerHTML='';
+  if(!arr.length){ wrap.textContent='No se detectaron filas.'; return; }
+
+  const keys=Object.keys(arr[0]);
+  const table=document.createElement('table');
+  const thead=document.createElement('thead'); const trh=document.createElement('tr');
+  keys.forEach(k=>{const th=document.createElement('th');th.textContent=k;trh.appendChild(th);});
+  thead.appendChild(trh); table.appendChild(thead);
+
+  const tbody=document.createElement('tbody');
+  arr.forEach(r=>{
+    const tr=document.createElement('tr');
+    keys.forEach(k=>{const td=document.createElement('td');td.textContent=r[k];tr.appendChild(td);});
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody); wrap.appendChild(table);
+}
+
+/* ---------- descargar Excel ---------- */
+function downloadExcel(){
+  if(!formattedData.length){ alert('Primero procesa un PDF'); return; }
+  const ws = XLSX.utils.json_to_sheet(formattedData);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Formateado');
+  XLSX.writeFile(wb, outputName);
+}
+
+/* ---------- revisión de carga (formato tipo tabla dinámica) ---------- */
+function buildRevisionAoA(data){
+  const map = new Map();
+
+  data.forEach(r=>{
+    const embarque = String(r['Embarque'] ?? '').trim() || 'SIN_EMBARQUE';
+    const pallet   = String(r['Pallet number'] ?? '').trim() || 'SIN_PALLET';
+    const item     = String(r['Item'] ?? '').trim();
+
+    const key = `${embarque}||${pallet}||${item}`;
+    let agg = map.get(key);
+    if(!agg){
+      agg = {embarque, pallet, item, boxes:0, upb:0, total:0, comments:new Set()};
+      map.set(key, agg);
+    }
+    agg.boxes += Number(r['Boxes']) || 0;
+    agg.upb   += Number(r['Units per box']) || 0;
+    agg.total += Number(r['Total']) || 0;
+    String(r['Comentarios'] || '').split(' | ').map(x=>x.trim()).filter(Boolean).forEach(x=>agg.comments.add(x));
+  });
+
+  // Embarque -> Pallet -> Items
+  const tree = {};
+  for(const agg of map.values()){
+    tree[agg.embarque] ??= {};
+    tree[agg.embarque][agg.pallet] ??= [];
+    tree[agg.embarque][agg.pallet].push(agg);
+  }
+
+  const headers = ['Embarque','Pallet number','Item','Boxes','Units per box','Total','Comentarios'];
+  const aoa = [headers];
+
+  Object.keys(tree).sort().forEach(emb=>{
+    aoa.push([`Embarque: ${emb}`,'','','','','','']);
+
+    const pallets = tree[emb];
+    Object.keys(pallets).sort().forEach(pal=>{
+      aoa.push(['',`Pallet: ${pal}`,'','','','','']);
+
+      pallets[pal]
+        .sort((a,b)=>String(a.item).localeCompare(String(b.item)))
+        .forEach(agg=>{
+          aoa.push(['','', agg.item, agg.boxes, agg.upb, agg.total, Array.from(agg.comments).join(' | ') ]);
+        });
+    });
+
+    // Separador entre embarques (sin afectar el flujo pallet->pallet)
+    aoa.push(['','','','','','','']);
+  });
+
+  // Quitar separador final (evita "cola" vacía)
+  while(aoa.length>1 && aoa[aoa.length-1].every(v => String(v||'').trim()==='')) aoa.pop();
+
+  return aoa;
+}
+
+
+function styleCell(ws, r, c, style, fmt){
+  const addr = XLSX.utils.encode_cell({r,c});
+  if(!ws[addr]) return;
+  ws[addr].s = style;
+  if(fmt) ws[addr].z = fmt;
+}
+
+function downloadRevisionExcel(){
+  if(!formattedData.length){ alert('Primero procesa uno o varios PDF'); return; }
+
+  // Hoja 1: Formateado (detalle)
+  const ws1 = XLSX.utils.json_to_sheet(formattedData);
+
+  // Hoja 2: Revisión de carga (resumen tipo dinámica)
+  const aoa = buildRevisionAoA(formattedData);
+  const ws2 = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Anchos de columna (legibles y pensados para comentarios)
+  ws2['!cols'] = [
+    {wch:16}, // Embarque
+    {wch:26}, // Pallet number
+    {wch:12}, // Item
+    {wch:10}, // Boxes
+    {wch:14}, // Units per box
+    {wch:10}, // Total
+    {wch:40}  // Comentarios
+  ];
+
+  // Estilos (colores con contraste para que los números se vean)
+  const sHeader = {
+    font:{bold:true,color:{rgb:'FFFFFF'}},
+    fill:{patternType:'solid',fgColor:{rgb:'1F4E79'}},
+    alignment:{horizontal:'center',vertical:'center'}
+  };
+  const sEmbarque = {
+    font:{bold:true,color:{rgb:'FFFFFF'}},
+    fill:{patternType:'solid',fgColor:{rgb:'0B5345'}},
+    alignment:{horizontal:'left',vertical:'center'}
+  };
+  const sPallet = {
+    font:{bold:true,color:{rgb:'000000'}},
+    fill:{patternType:'solid',fgColor:{rgb:'D6EAF8'}},
+    alignment:{horizontal:'left',vertical:'center'}
+  };
+  const sNumber = { alignment:{horizontal:'right',vertical:'center'} };
+  const sText   = { alignment:{horizontal:'left',vertical:'center'} };
+
+  const merges = [];
+
+  for(let r=0; r<aoa.length; r++){
+    const row = aoa[r] || [];
+    const isHeader   = (r===0);
+    const isEmbRow   = String(row[0]||'').startsWith('Embarque:');
+    const isPalRow   = String(row[1]||'').startsWith('Pallet:');
+    // (sin subtotal)
+    const isBlank    = row.every(v => String(v||'').trim()==='');
+
+    if(isHeader){
+      for(let c=0;c<7;c++) styleCell(ws2,r,c,sHeader);
+      continue;
+    }
+
+    if(isEmbRow){
+      // merge A..G
+      merges.push({s:{r,c:0}, e:{r,c:6}});
+      for(let c=0;c<7;c++) styleCell(ws2,r,c,sEmbarque);
+      continue;
+    }
+
+    if(isPalRow){
+      // merge B..G (A queda vacío)
+      merges.push({s:{r,c:1}, e:{r,c:6}});
+      styleCell(ws2,r,0,sText);
+      for(let c=1;c<7;c++) styleCell(ws2,r,c,sPallet);
+      continue;
+    }
+
+    if(isBlank){
+      // fila separadora: no molestar
+      continue;
+    }
+
+    // filas normales (items) y subtotales
+    for(let c=0;c<7;c++){
+      if(c>=3 && c<=5){
+        styleCell(ws2,r,c,sNumber,'0');
+      }else{
+        styleCell(ws2,r,c,sText);
+      }
+    }
+  }
+
+  if(merges.length) ws2['!merges'] = merges;
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws1, 'Formateado');
+  XLSX.utils.book_append_sheet(wb, ws2, 'Revisión de carga');
+
+  const name = outputName.replace(/\.xlsx$/i,'') + '_REVISION.xlsx';
+  XLSX.writeFile(wb, name);
+}
+
+
+/* ---------- flujo principal ---------- */
+async function processPDF(){
+  const inputFiles = Array.from(document.getElementById('input-pdf').files || []);
+  const files = selectedFiles.length ? selectedFiles : inputFiles;
+
+  const st    = document.getElementById('status');
+  const btnDl = document.getElementById('btn-download');
+  const btnRv = document.getElementById('btn-review');
+
+  if(!files.length){ alert('Sube uno o varios PDF primero'); return; }
+
+  outputName = 'packing_lists_consolidado.xlsx';
+  st.textContent = ` Procesando ${files.length} PDF(s)…`;
+  btnDl.disabled = true;
+  if(btnRv) btnRv.disabled = true;
+
+  const all = [];
+  const errores = [];
+
+  try{
+    for(let i=0; i<files.length; i++){
+      const f = files[i];
+      st.textContent = ` Procesando ${i+1}/${files.length}: ${f.name}…`;
+
+      try{
+        const lines    = await pdfToLines(f);
+        const embarque = extractInvoice(lines) || '';
+        const raw      = parseLines(lines);
+        const formatted= buildFormatted(raw, embarque);
+        all.push(...formatted);
+      }catch(errFile){
+        console.error(errFile);
+        errores.push(f.name);
+      }
+    }
+
+    formattedData = all;
+    applyPendingCommentsSilently();
+    showPreview(formattedData);
+
+    if(!formattedData.length){
+      st.textContent='';
+      alert('No se detectaron filas en los PDF(s) seleccionados.');
+      return;
+    }
+
+    if(errores.length){
+      st.textContent = ` ✓ Listo. Nota: ${errores.length} PDF(s) no se pudieron procesar (revisa consola).`;
+    }else{
+      st.textContent = ' ✓ ¡Listo!';
+    }
+
+    btnDl.disabled = false;
+    if(btnRv) btnRv.disabled = false;
+  }catch(err){
+    console.error(err);
+    alert('Error al procesar los PDF(s).');
+    st.textContent='';
+  }
+}
+</script>
+</body>
+</html>
